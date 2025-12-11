@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FITMA - Logic Management</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React and ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Icons -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .glass-header { background: rgba(15, 23, 42, 0.9); backdrop-filter: blur(10px); }
+        .input-dark { background: #334155; border: 1px solid #475569; color: white; }
+        .input-dark:focus { outline: 2px solid #3b82f6; border-color: transparent; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+        
+        .animate-fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+        
+        /* Matrix Quadrants */
+        .matrix-grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 8px; height: 100%; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- Logic Helpers ---
+
+        const calculateUrgencyScore = (task) => {
+            if (task.status === 'done') return -9999;
+            const priorityWeights = { 'Low': 1, 'Medium': 2, 'High': 3, 'Critical': 4 };
+            const typeWeights = { 'Task': 1, 'Project': 1.5, 'Test': 3 };
+            
+            const pWeight = priorityWeights[task.priority] || 1;
+            const tWeight = typeWeights[task.type] || 1;
+            const hoursUntilDue = (new Date(task.dueDate) - new Date()) / (1000 * 60 * 60);
+
+            return (pWeight * tWeight * 500) - hoursUntilDue;
+        };
+
+        const formatDuration = (ms) => {
+            const seconds = Math.floor((ms / 1000) % 60);
+            const minutes = Math.floor((ms / (1000 * 60)) % 60);
+            const hours = Math.floor((ms / (1000 * 60 * 60)));
+            return `${hours}h ${minutes}m ${seconds}s`;
+        };
+
+        // --- Components ---
+
+        const StatCard = ({ title, value, subtext, color, icon }) => (
+            <div className={`glass-panel p-4 rounded-xl border-l-4 ${color} relative overflow-hidden`}>
+                <div className="relative z-10">
+                    <h3 className="text-slate-400 text-[10px] uppercase font-bold tracking-wider">{title}</h3>
+                    <div className="text-2xl font-bold mt-1">{value}</div>
+                    <div className="text-xs text-slate-500 mt-1">{subtext}</div>
+                </div>
+                <i className={`fas ${icon} absolute bottom-2 right-2 text-4xl opacity-10`}></i>
+            </div>
+        );
+
+        const EfficiencyGraph = ({ completedTasks }) => {
+            const days = [...Array(7)].map((_, i) => {
+                const d = new Date();
+                d.setDate(d.getDate() - (6 - i));
+                return d;
+            });
+
+            const data = days.map(day => {
+                const dayStr = day.toDateString();
+                const totalHours = completedTasks
+                    .filter(t => t.finishDate && new Date(t.finishDate).toDateString() === dayStr)
+                    .reduce((acc, t) => acc + (parseFloat(t.actualTime) || 0), 0);
+                return { label: day.toLocaleDateString('en-US', { weekday: 'short' }), value: totalHours };
+            });
+
+            const maxVal = Math.max(...data.map(d => d.value), 1); // Avoid div by zero
+
+            return (
+                <div className="glass-panel p-4 rounded-xl">
+                    <h3 className="text-slate-400 text-[10px] uppercase font-bold tracking-wider mb-4">7-Day Efficiency (Hours)</h3>
+                    <div className="flex items-end justify-between h-24 gap-2">
+                        {data.map((d, i) => (
+                            <div key={i} className="flex flex-col items-center gap-1 flex-1">
+                                <div className="w-full bg-blue-500/20 rounded-t relative group hover:bg-blue-500/40 transition" 
+                                     style={{ height: `${(d.value / maxVal) * 100}%`, minHeight: '4px' }}>
+                                    <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 text-[10px] bg-slate-800 px-1 rounded opacity-0 group-hover:opacity-100 transition">
+                                        {d.value.toFixed(1)}h
+                                    </div>
+                                </div>
+                                <span className="text-[9px] text-slate-500">{d.label}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        const SubjectBreakdown = ({ tasks }) => {
+            const stats = useMemo(() => {
+                const map = {};
+                tasks.forEach(t => {
+                    if (!map[t.subject]) map[t.subject] = { pending: 0, timeSpent: 0, total: 0 };
+                    if (t.status !== 'done') map[t.subject].pending++;
+                    if (t.status === 'done') map[t.subject].timeSpent += (parseFloat(t.actualTime) || 0);
+                    map[t.subject].total++;
+                });
+                return Object.entries(map).sort((a, b) => b[1].pending - a[1].pending);
+            }, [tasks]);
+
+            return (
+                <div className="glass-panel p-4 rounded-xl overflow-hidden">
+                    <h3 className="text-slate-400 text-[10px] uppercase font-bold tracking-wider mb-2">Subject Performance</h3>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-xs text-left">
+                            <thead className="text-slate-500 border-b border-white/5">
+                                <tr>
+                                    <th className="pb-1">Subject</th>
+                                    <th className="pb-1 text-center">Pending</th>
+                                    <th className="pb-1 text-right">Time Spent</th>
+                                </tr>
+                            </thead>
+                            <tbody className="text-slate-300">
+                                {stats.map(([sub, data]) => (
+                                    <tr key={sub} className="border-b border-white/5 last:border-0">
+                                        <td className="py-2">{sub}</td>
+                                        <td className="py-2 text-center font-mono">{data.pending}</td>
+                                        <td className="py-2 text-right font-mono text-emerald-400">{data.timeSpent.toFixed(1)}h</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const TaskCard = ({ task, onComplete, onDelete, onUpdateChecklist, isActive, onToggleTimer }) => {
+            const [isExpanded, setIsExpanded] = useState(false);
+            const [newSubtask, setNewSubtask] = useState("");
+
+            // Helper to determine styles
+            const getStyles = () => {
+                if (task.type === 'Test') return 'border-red-500 bg-red-500/5';
+                if (task.type === 'Project') return 'border-purple-500 bg-purple-500/5';
+                return 'border-blue-500 bg-blue-500/5';
+            };
+
+            const handleAddSubtask = (e) => {
+                e.preventDefault();
+                if (!newSubtask.trim()) return;
+                onUpdateChecklist(task.id, [...(task.checklist || []), { id: Date.now(), text: newSubtask, done: false }]);
+                setNewSubtask("");
+            };
+
+            const toggleSubtask = (itemId) => {
+                onUpdateChecklist(task.id, task.checklist.map(i => i.id === itemId ? { ...i, done: !i.done } : i));
+            };
+
+            const progress = task.checklist?.length > 0 
+                ? Math.round((task.checklist.filter(i => i.done).length / task.checklist.length) * 100) 
+                : 0;
+
+            return (
+                <div className={`glass-panel rounded-xl p-3 mb-3 border-l-4 ${getStyles()} ${task.status === 'done' ? 'opacity-50' : ''}`}>
+                    <div className="flex justify-between items-start">
+                        <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                <span className="text-[10px] bg-slate-700 px-1.5 py-0.5 rounded text-slate-300">{task.subject}</span>
+                                {task.isRecurring && <span className="text-[10px] bg-indigo-900 text-indigo-300 px-1.5 py-0.5 rounded"><i className="fas fa-sync-alt"></i> Weekly</span>}
+                                <span className={`text-[10px] border px-1.5 py-0.5 rounded ${getStyles()}`}>{task.type}</span>
+                            </div>
+                            <h3 className="text-sm font-bold text-white truncate pr-2">{task.title}</h3>
+                            <div className="text-[10px] text-slate-400 mt-1 flex gap-3">
+                                <span><i className="far fa-clock"></i> {task.estTime}h Est</span>
+                                {task.status === 'done' ? (
+                                    <span className="text-emerald-400 font-bold">Done: {task.actualTime}h</span>
+                                ) : (
+                                    <span className={new Date(task.dueDate) < new Date() ? "text-red-400" : ""}>
+                                        <i className="far fa-calendar"></i> {new Date(task.dueDate).toLocaleDateString()}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                        
+                        <div className="flex gap-2 shrink-0">
+                            {task.status !== 'done' && (
+                                <>
+                                    <button onClick={() => onToggleTimer(task)} className={`w-8 h-8 rounded-lg flex items-center justify-center transition ${isActive ? 'bg-amber-500 text-white animate-pulse' : 'bg-slate-700 text-slate-400 hover:text-white'}`}>
+                                        <i className={`fas ${isActive ? 'fa-pause' : 'fa-play'}`}></i>
+                                    </button>
+                                    <button onClick={() => onComplete(task.id)} className="w-8 h-8 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg flex items-center justify-center">
+                                        <i className="fas fa-check"></i>
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+
+                    {task.checklist?.length > 0 && (
+                        <div className="mt-2 h-1 w-full bg-slate-700 rounded-full overflow-hidden">
+                            <div className="h-full bg-indigo-500 transition-all" style={{ width: `${progress}%` }}></div>
+                        </div>
+                    )}
+
+                    <button onClick={() => setIsExpanded(!isExpanded)} className="w-full mt-2 text-[10px] text-slate-500 hover:text-slate-300 text-center">
+                        <i className={`fas fa-chevron-${isExpanded ? 'up' : 'down'}`}></i>
+                    </button>
+
+                    {isExpanded && (
+                        <div className="mt-2 pt-2 border-t border-white/5">
+                            <div className="space-y-1 mb-2">
+                                {task.checklist?.map(item => (
+                                    <div key={item.id} className="flex items-center gap-2">
+                                        <input type="checkbox" checked={item.done} onChange={() => toggleSubtask(item.id)} className="rounded bg-slate-700 border-slate-600" />
+                                        <span className={`text-xs ${item.done ? 'line-through text-slate-500' : 'text-slate-300'}`}>{item.text}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <form onSubmit={handleAddSubtask} className="flex gap-2 mb-2">
+                                <input type="text" value={newSubtask} onChange={e => setNewSubtask(e.target.value)} placeholder="New subtask..." className="flex-1 bg-slate-800 text-xs p-1 rounded border border-slate-600 text-white" />
+                                <button type="submit" className="text-blue-400"><i className="fas fa-plus"></i></button>
+                            </form>
+                            <button onClick={() => onDelete(task.id)} className="text-xs text-red-400 w-full text-right">Delete Task</button>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const EisenhowerMatrix = ({ tasks }) => {
+            // Q1: Urgent & Important (High/Crit + < 48h)
+            // Q2: Not Urgent & Important (High/Crit + > 48h)
+            // Q3: Urgent & Not Important (Low/Med + < 48h)
+            // Q4: Not Urgent & Not Important (Low/Med + > 48h)
+            
+            const categorize = (t) => {
+                if (t.status === 'done') return null;
+                const isUrgent = (new Date(t.dueDate) - new Date()) < (48 * 60 * 60 * 1000);
+                const isImportant = ['High', 'Critical'].includes(t.priority);
+                
+                if (isUrgent && isImportant) return 'q1';
+                if (!isUrgent && isImportant) return 'q2';
+                if (isUrgent && !isImportant) return 'q3';
+                return 'q4';
+            };
+
+            const buckets = { q1: [], q2: [], q3: [], q4: [] };
+            tasks.forEach(t => {
+                const cat = categorize(t);
+                if (cat) buckets[cat].push(t);
+            });
+
+            const Quadrant = ({ title, items, color, desc }) => (
+                <div className={`bg-slate-800/50 p-2 rounded border border-white/5 overflow-y-auto flex flex-col`}>
+                    <h4 className={`text-xs font-bold ${color} mb-0.5`}>{title}</h4>
+                    <p className="text-[9px] text-slate-500 mb-2">{desc}</p>
+                    <div className="space-y-1 flex-1">
+                        {items.map(t => (
+                            <div key={t.id} className="bg-slate-700/50 p-1.5 rounded text-[10px] border-l-2 border-white/20">
+                                <div className="font-medium text-slate-200 truncate">{t.title}</div>
+                                <div className="text-slate-500">{new Date(t.dueDate).toLocaleDateString()}</div>
+                            </div>
+                        ))}
+                        {items.length === 0 && <div className="text-[9px] text-slate-600 italic">Empty</div>}
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="animate-fade-in h-full flex flex-col">
+                    <h2 className="text-lg font-bold text-white mb-2">Decision Matrix</h2>
+                    <div className="matrix-grid flex-1 pb-20">
+                        <Quadrant title="DO NOW" items={buckets.q1} color="text-emerald-400" desc="Urgent & Important" />
+                        <Quadrant title="SCHEDULE" items={buckets.q2} color="text-blue-400" desc="Important, Not Urgent" />
+                        <Quadrant title="DELEGATE" items={buckets.q3} color="text-orange-400" desc="Urgent, Not Important" />
+                        <Quadrant title="DELETE" items={buckets.q4} color="text-slate-400" desc="Neither" />
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [tasks, setTasks] = useState([]);
+            const [view, setView] = useState('dashboard');
+            const [timerState, setTimerState] = useState({ taskId: null, startTime: null });
+            const [elapsed, setElapsed] = useState(0);
+            const [grouping, setGrouping] = useState('none'); // none, subject, type
+            
+            // Form Data
+            const [formData, setFormData] = useState({
+                title: '', subject: '', type: 'Task', priority: 'Medium',
+                startDate: '', dueDate: '', estTime: '', initialSubtask: '', isRecurring: false
+            });
+
+            // Refs for interval
+            const timerRef = useRef(null);
+
+            // --- Load/Save ---
+            useEffect(() => {
+                const saved = localStorage.getItem('fitma_data');
+                if (saved) setTasks(JSON.parse(saved));
+            }, []);
+
+            useEffect(() => {
+                localStorage.setItem('fitma_data', JSON.stringify(tasks));
+            }, [tasks]);
+
+            // --- Timer Logic ---
+            useEffect(() => {
+                if (timerState.taskId) {
+                    timerRef.current = setInterval(() => {
+                        setElapsed(Date.now() - timerState.startTime);
+                    }, 1000);
+                } else {
+                    clearInterval(timerRef.current);
+                    setElapsed(0);
+                }
+                return () => clearInterval(timerRef.current);
+            }, [timerState]);
+
+            const toggleTimer = (task) => {
+                if (timerState.taskId === task.id) {
+                    // Stop Timer
+                    const sessionDuration = (Date.now() - timerState.startTime) / (1000 * 60 * 60); // in hours
+                    const updatedTasks = tasks.map(t => 
+                        t.id === task.id ? { ...t, actualTime: (parseFloat(t.actualTime) || 0) + sessionDuration } : t
+                    );
+                    setTasks(updatedTasks);
+                    setTimerState({ taskId: null, startTime: null });
+                } else {
+                    // Start Timer (If another runs, stop it first)
+                    if (timerState.taskId) {
+                        const prevTask = tasks.find(t => t.id === timerState.taskId);
+                        if (prevTask) {
+                            const sessionDuration = (Date.now() - timerState.startTime) / (1000 * 60 * 60);
+                             setTasks(prev => prev.map(t => 
+                                t.id === prevTask.id ? { ...t, actualTime: (parseFloat(t.actualTime) || 0) + sessionDuration } : t
+                            ));
+                        }
+                    }
+                    setTimerState({ taskId: task.id, startTime: Date.now() });
+                }
+            };
+
+            // --- Core Actions ---
+            const addTask = (e) => {
+                e.preventDefault();
+                const checklist = formData.initialSubtask ? [{ id: Date.now()+1, text: formData.initialSubtask, done: false }] : [];
+                const newTask = {
+                    id: Date.now(),
+                    ...formData,
+                    estTime: parseFloat(formData.estTime) || 0,
+                    actualTime: 0,
+                    status: 'todo',
+                    checklist,
+                    finishDate: null
+                };
+                setTasks([...tasks, newTask]);
+                setFormData({ title: '', subject: '', type: 'Task', priority: 'Medium', startDate: '', dueDate: '', estTime: '', initialSubtask: '', isRecurring: false });
+                setView('dashboard');
+            };
+
+            const completeTask = (id) => {
+                // If timer running on this task, stop it and add time
+                let addedTime = 0;
+                if (timerState.taskId === id) {
+                    addedTime = (Date.now() - timerState.startTime) / (1000 * 60 * 60);
+                    setTimerState({ taskId: null, startTime: null });
+                }
+
+                const task = tasks.find(t => t.id === id);
+                const finalTime = (parseFloat(task.actualTime) || 0) + addedTime;
+                
+                // Handle Recurring
+                if (task.isRecurring) {
+                    const nextDate = new Date(task.dueDate);
+                    nextDate.setDate(nextDate.getDate() + 7);
+                    const nextTask = {
+                        ...task,
+                        id: Date.now(),
+                        dueDate: nextDate.toISOString(),
+                        startDate: new Date().toISOString(),
+                        actualTime: 0,
+                        status: 'todo',
+                        checklist: task.checklist.map(i => ({ ...i, done: false })) // reset checklist
+                    };
+                    // Mark old as done, add new
+                    setTasks([...tasks.map(t => t.id === id ? { ...t, status: 'done', finishDate: new Date().toISOString(), actualTime: finalTime } : t), nextTask]);
+                } else {
+                    setTasks(tasks.map(t => t.id === id ? { ...t, status: 'done', finishDate: new Date().toISOString(), actualTime: finalTime } : t));
+                }
+            };
+
+            const updateChecklist = (id, list) => setTasks(tasks.map(t => t.id === id ? { ...t, checklist: list } : t));
+            const deleteTask = (id) => confirm("Delete?") && setTasks(tasks.filter(t => t.id !== id));
+
+            const exportData = () => {
+                const blob = new Blob([JSON.stringify(tasks)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `fitma_backup_${new Date().toISOString().split('T')[0]}.json`;
+                a.click();
+            };
+
+            const importData = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (ev) => setTasks(JSON.parse(ev.target.result));
+                    reader.readAsText(file);
+                }
+            };
+
+            // --- Stats Calculation ---
+            const stats = useMemo(() => {
+                const active = tasks.filter(t => t.status !== 'done');
+                const done = tasks.filter(t => t.status === 'done');
+                const sorted = [...active].sort((a, b) => calculateUrgencyScore(b) - calculateUrgencyScore(a));
+                return { active, done, nextUp: sorted[0] };
+            }, [tasks]);
+
+            // --- Render Views ---
+            return (
+                <div className="max-w-md mx-auto min-h-screen flex flex-col bg-[#0f172a]">
+                    {/* Header */}
+                    <header className="p-4 glass-header sticky top-0 z-40 border-b border-white/5 flex justify-between items-center">
+                        <div>
+                            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">FITMA</h1>
+                            <div className="text-[10px] text-slate-400">{new Date().toDateString()}</div>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={exportData} className="text-slate-400 hover:text-white text-xs"><i className="fas fa-download"></i></button>
+                            <label className="text-slate-400 hover:text-white text-xs cursor-pointer">
+                                <i className="fas fa-upload"></i>
+                                <input type="file" className="hidden" accept=".json" onChange={importData} />
+                            </label>
+                        </div>
+                    </header>
+
+                    <main className="flex-1 p-4 pb-24 overflow-y-auto">
+                        {view === 'dashboard' && (
+                            <div className="space-y-4 animate-fade-in">
+                                {/* Focus Section with Timer */}
+                                {stats.nextUp ? (
+                                    <div className="relative glass-panel p-5 rounded-xl border-l-4 border-emerald-500">
+                                        <div className="flex justify-between items-start mb-2">
+                                            <span className="text-emerald-400 font-bold text-[10px] uppercase flex items-center gap-1">
+                                                <i className="fas fa-bolt"></i> Focus Mode
+                                            </span>
+                                            {timerState.taskId === stats.nextUp.id && (
+                                                <span className="text-amber-400 font-mono font-bold animate-pulse">{formatDuration(elapsed)}</span>
+                                            )}
+                                        </div>
+                                        <h2 className="text-xl font-bold text-white mb-1">{stats.nextUp.title}</h2>
+                                        <div className="text-xs text-slate-400 mb-4">{stats.nextUp.subject} • {stats.nextUp.estTime}h Est</div>
+                                        
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <button onClick={() => toggleTimer(stats.nextUp)} className={`py-2 rounded-lg font-bold text-sm transition ${timerState.taskId === stats.nextUp.id ? 'bg-amber-600 text-white' : 'bg-slate-700 text-slate-300'}`}>
+                                                {timerState.taskId === stats.nextUp.id ? 'Pause Timer' : 'Start Focus'}
+                                            </button>
+                                            <button onClick={() => completeTask(stats.nextUp.id)} className="bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-lg text-sm font-bold">
+                                                Done
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="glass-panel p-6 rounded-xl text-center text-slate-500">
+                                        <p className="text-sm">No pending tasks. Enjoy the free time!</p>
+                                    </div>
+                                )}
+
+                                <EfficiencyGraph completedTasks={stats.done} />
+                                <SubjectBreakdown tasks={tasks} />
+                            </div>
+                        )}
+
+                        {view === 'matrix' && <EisenhowerMatrix tasks={stats.active} />}
+
+                        {view === 'add' && (
+                            <div className="animate-fade-in">
+                                <h2 className="text-lg font-bold mb-4 text-white">New Entry</h2>
+                                <form onSubmit={addTask} className="space-y-3">
+                                    <input required placeholder="Title" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full p-3 rounded-lg input-dark text-sm" />
+                                    <input required placeholder="Subject" value={formData.subject} onChange={e => setFormData({...formData, subject: e.target.value})} className="w-full p-3 rounded-lg input-dark text-sm" />
+                                    
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className="p-3 rounded-lg input-dark text-sm">
+                                            <option>Task</option><option>Project</option><option>Test</option>
+                                        </select>
+                                        <select value={formData.priority} onChange={e => setFormData({...formData, priority: e.target.value})} className="p-3 rounded-lg input-dark text-sm">
+                                            <option>Low</option><option>Medium</option><option>High</option><option>Critical</option>
+                                        </select>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-[10px] text-slate-400 block mb-1">Start</label>
+                                            <input type="datetime-local" required value={formData.startDate} onChange={e => setFormData({...formData, startDate: e.target.value})} className="w-full p-2 rounded input-dark text-xs" />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] text-slate-400 block mb-1">Due</label>
+                                            <input type="datetime-local" required value={formData.dueDate} onChange={e => setFormData({...formData, dueDate: e.target.value})} className="w-full p-2 rounded input-dark text-xs" />
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <input type="number" step="0.5" placeholder="Hours" value={formData.estTime} onChange={e => setFormData({...formData, estTime: e.target.value})} className="p-3 rounded-lg input-dark text-sm" />
+                                        <input placeholder="First Subtask..." value={formData.initialSubtask} onChange={e => setFormData({...formData, initialSubtask: e.target.value})} className="col-span-2 p-3 rounded-lg input-dark text-sm" />
+                                    </div>
+
+                                    <label className="flex items-center gap-2 text-sm text-slate-300 p-2 bg-slate-800/50 rounded border border-white/5">
+                                        <input type="checkbox" checked={formData.isRecurring} onChange={e => setFormData({...formData, isRecurring: e.target.checked})} className="rounded bg-slate-700" />
+                                        <i className="fas fa-sync-alt text-indigo-400"></i> Repeat Weekly
+                                    </label>
+
+                                    <button type="submit" className="w-full bg-emerald-600 text-white py-3 rounded-lg font-bold mt-2">Add to Logic Engine</button>
+                                </form>
+                            </div>
+                        )}
+
+                        {view === 'list' && (
+                            <div className="animate-fade-in">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-lg font-bold text-white">Agenda</h2>
+                                    <select value={grouping} onChange={e => setGrouping(e.target.value)} className="bg-slate-800 text-xs text-slate-300 border border-slate-600 rounded px-2 py-1">
+                                        <option value="none">No Grouping</option>
+                                        <option value="subject">By Subject</option>
+                                        <option value="type">By Type</option>
+                                    </select>
+                                </div>
+                                
+                                {grouping === 'none' ? (
+                                    stats.active.map(t => <TaskCard key={t.id} task={t} isActive={timerState.taskId === t.id} onToggleTimer={toggleTimer} onComplete={completeTask} onDelete={deleteTask} onUpdateChecklist={updateChecklist} />)
+                                ) : (
+                                    Object.entries(stats.active.reduce((acc, t) => {
+                                        const key = t[grouping];
+                                        if(!acc[key]) acc[key] = [];
+                                        acc[key].push(t);
+                                        return acc;
+                                    }, {})).map(([key, groupTasks]) => (
+                                        <div key={key} className="mb-4">
+                                            <h3 className="text-xs font-bold text-indigo-400 uppercase mb-2 pl-1 border-l-2 border-indigo-500">{key}</h3>
+                                            {groupTasks.map(t => <TaskCard key={t.id} task={t} isActive={timerState.taskId === t.id} onToggleTimer={toggleTimer} onComplete={completeTask} onDelete={deleteTask} onUpdateChecklist={updateChecklist} />)}
+                                        </div>
+                                    ))
+                                )}
+                                {stats.active.length === 0 && <div className="text-slate-500 text-center text-xs">No tasks.</div>}
+                            </div>
+                        )}
+
+                        {view === 'calendar' && (
+                           <div className="animate-fade-in pb-20">
+                                <h2 className="text-lg font-bold text-white mb-4 text-center">Overview</h2>
+                                <div className="calendar-grid mb-1">
+                                    {['S','M','T','W','T','F','S'].map((d,i) => <div key={i} className="text-slate-500 text-xs text-center font-bold">{d}</div>)}
+                                </div>
+                                <div className="calendar-grid">
+                                    {[...Array(35)].map((_, i) => {
+                                        // Simplified logic for current month view visual
+                                        const d = new Date();
+                                        d.setDate(1); // Start of this month
+                                        const startDay = d.getDay();
+                                        const dayNum = i - startDay + 1;
+                                        const date = new Date(d.getFullYear(), d.getMonth(), dayNum);
+                                        const isToday = new Date().toDateString() === date.toDateString();
+                                        
+                                        // Find tasks
+                                        const dayTasks = tasks.filter(t => t.status !== 'done' && new Date(t.dueDate).toDateString() === date.toDateString());
+                                        
+                                        if (dayNum < 1 || dayNum > 31) return <div key={i}></div>;
+
+                                        return (
+                                            <div key={i} className={`min-h-[60px] bg-slate-800/30 border border-white/5 rounded p-1 ${isToday ? 'ring-1 ring-blue-500' : ''}`}>
+                                                <div className={`text-[10px] mb-1 ${isToday ? 'text-blue-400 font-bold' : 'text-slate-500'}`}>{dayNum}</div>
+                                                <div className="space-y-0.5">
+                                                    {dayTasks.map(t => (
+                                                        <div key={t.id} className={`h-1.5 w-full rounded-full ${t.type==='Test'?'bg-red-500':t.type==='Project'?'bg-purple-500':'bg-blue-500'}`}></div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                <div className="mt-4 text-center text-xs text-slate-500">
+                                    <span className="text-red-400">● Test</span> <span className="text-purple-400">● Project</span> <span className="text-blue-400">● Task</span>
+                                </div>
+                           </div> 
+                        )}
+                    </main>
+
+                    {/* Nav */}
+                    <nav className="fixed bottom-0 left-0 right-0 glass-panel border-t border-white/5 px-2 py-3 flex justify-around items-center z-50 text-[10px] uppercase tracking-wide font-bold text-slate-500">
+                        <button onClick={() => setView('dashboard')} className={`flex flex-col items-center gap-1 ${view === 'dashboard' ? 'text-blue-400' : ''}`}>
+                            <i className="fas fa-chart-pie text-lg"></i> Stats
+                        </button>
+                        <button onClick={() => setView('matrix')} className={`flex flex-col items-center gap-1 ${view === 'matrix' ? 'text-emerald-400' : ''}`}>
+                            <i className="fas fa-th-large text-lg"></i> Matrix
+                        </button>
+                        <button onClick={() => setView('add')} className="bg-blue-600 hover:bg-blue-500 text-white w-12 h-12 rounded-full flex items-center justify-center -mt-8 shadow-lg shadow-blue-900/50 border-4 border-[#0f172a]">
+                            <i className="fas fa-plus text-xl"></i>
+                        </button>
+                        <button onClick={() => setView('calendar')} className={`flex flex-col items-center gap-1 ${view === 'calendar' ? 'text-purple-400' : ''}`}>
+                            <i className="fas fa-calendar-alt text-lg"></i> Plan
+                        </button>
+                        <button onClick={() => setView('list')} className={`flex flex-col items-center gap-1 ${view === 'list' ? 'text-orange-400' : ''}`}>
+                            <i className="fas fa-list text-lg"></i> List
+                        </button>
+                    </nav>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+
+
+
